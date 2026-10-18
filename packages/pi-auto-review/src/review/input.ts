@@ -27,12 +27,10 @@ import {
   REVIEWER_FRAMING_RESERVE_TOKENS,
 } from "./consts.ts";
 import { REVIEWER_SYSTEM_PROMPT } from "./prompts.ts";
-import {
-  MAX_REVIEWER_COMMAND_BYTES,
-  truncateUtf8,
-} from "./shell-text.ts";
 import { applyProjectConfig } from "./config.ts";
 import { assertTrustedInstallation } from "./guards.ts";
+import { estimateReviewerTokens } from "./token-estimate.ts";
+export { estimateReviewerTokens } from "./token-estimate.ts";
 
 export function sessionConfig(
   cwd: string,
@@ -163,6 +161,10 @@ export function sharedReviewContext(
   transcript: TranscriptResult,
   reviewerContext?: BoundaryReviewerContext,
 ): string {
+  const rawUserAuthorization = transcript.rawUserAuthorization ?? {
+    status: "unavailable",
+    sources: [],
+  };
   return canonicalReviewerJson({
     evidence: {
       relevantResults: {
@@ -182,9 +184,22 @@ export function sharedReviewContext(
       ...(transcript.compactionState !== "none"
         ? { agentGeneratedSummaryExcludedFromAuthorization: true }
         : {}),
-      evidenceOmittedOrTruncated: transcript.truncated,
+      evidenceOmittedOrTruncated:
+        reviewerRequestView(request).fullCommandTruncated === true ||
+        rawUserAuthorization.status !== "complete" ||
+        transcript.failureCode === "critical_evidence_overflow" ||
+        transcript.failureCode === "required_profile_overflow" ||
+        transcript.selectedCandidates.some((item) => item.truncated &&
+          (item.reason === "exact-tool-call" || item.reason === "security-combination" ||
+            item.reason === "sandbox-trap")),
+      optionalHistoryOmittedOrTruncated: transcript.optionalHistoryOmittedOrTruncated ?? false,
       rawUserAuthorizationUnavailable:
-        transcript.compactionState === "authorization-unavailable",
+        rawUserAuthorization.status === "unavailable",
+      rawUserAuthorizationIncomplete:
+        rawUserAuthorization.status === "incomplete",
+      ...((transcript as BudgetedTranscript).toolMetadataOmittedForBudget
+        ? { registeredToolMetadataOmittedForBudget: true }
+        : {}),
       ...(transcript.budgetRemovals.length > 0
         ? { budgetRemovals: transcript.budgetRemovals }
         : {}),
@@ -198,89 +213,33 @@ export function sharedReviewContext(
           },
         }
       : {}),
+    mandatoryEvidence: {
+      currentAction: {
+        id: request.id,
+        provenance: "permission-boundary-request",
+        complete: reviewerRequestView(request).fullCommandTruncated !== true,
+      },
+      rawUserAuthorization,
+    },
     profile: transcript.surfaceProfile,
     request: reviewerRequestView(request, transcript),
   });
 }
 
 /**
- * The bounded projection of a request that the reviewer model sees.
- *
- * `command`, `executedUnit`, and `fullCommand` are each cut to
- * {@link MAX_REVIEWER_COMMAND_BYTES}; any cut sets `fullCommandTruncated` so the
- * caller can fail closed instead of reviewing an incomplete program. Hashing,
- * hard denies, retry matching, and denial labels keep using the untruncated
- * request.
+ * Preserve all mandatory action facts. Only optional registration metadata may
+ * be omitted; the complete prompt's token cap, not a byte cap, bounds review.
+ * An incoming incompleteness marker is retained, never repaired by projection.
  */
 export function reviewerRequestView(
   request: BoundaryRequest,
   transcript?: TranscriptResult,
 ): BoundaryRequest {
-  let truncated = false;
-  const cut = (value: string | undefined): string | undefined => {
-    if (value === undefined) return undefined;
-    if (Buffer.byteLength(value, "utf8") <= MAX_REVIEWER_COMMAND_BYTES) {
-      return value;
-    }
-    truncated = true;
-    return truncateUtf8(value, MAX_REVIEWER_COMMAND_BYTES);
-  };
   const view: BoundaryRequest = { ...request };
   if ((transcript as BudgetedTranscript | undefined)?.toolMetadataOmittedForBudget) {
     delete view.toolMetadata;
   }
-  const command = cut(request.command);
-  const executedUnit = cut(request.executedUnit);
-  const fullCommand = cut(request.fullCommand);
-  if (command === undefined) delete view.command;
-  else view.command = command;
-  if (executedUnit === undefined) delete view.executedUnit;
-  else view.executedUnit = executedUnit;
-  if (fullCommand === undefined) delete view.fullCommand;
-  else view.fullCommand = fullCommand;
-  if (truncated) view.fullCommandTruncated = true;
   return view;
-}
-
-/**
- * Conservative token estimate for reviewer prompt sizing.
- *
- * CJK code points are estimated at one token each: UTF-8 encodes them as
- * three bytes, so the previous byte-for-token estimator overestimated
- * CJK-heavy review payloads ~3x and synchronously failed the input-budget
- * preflight ("reviewer_input_budget_exceeded") for large CJK tool inputs
- * such as long Chinese plan documents — before the reviewer model was ever
- * called. Remaining code points are estimated from their UTF-8 byte length
- * at 3 bytes per token, slightly conservative for ASCII (typical tokenizers
- * average ~4 bytes per token) and safely conservative for 2-4 byte scripts.
- */
-const OTHER_BYTES_PER_TOKEN = 3;
-
-function codePointUtf8Bytes(code: number): number {
-  return code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
-}
-
-function isCjkCodePoint(code: number): boolean {
-  return (
-    (code >= 0x3000 && code <= 0x9fff) || // CJK symbols, punctuation, ideographs
-    (code >= 0x3400 && code <= 0x4dbf) || // CJK extension A
-    (code >= 0xf900 && code <= 0xfaff) || // CJK compatibility ideographs
-    (code >= 0xac00 && code <= 0xd7af) || // Hangul syllables
-    (code >= 0x3040 && code <= 0x30ff) || // Hiragana + Katakana
-    (code >= 0xff00 && code <= 0xffef) // fullwidth/halfwidth forms
-  );
-}
-
-/** Exported for tests; see the estimator doc comment above. */
-export function estimateReviewerTokens(text: string): number {
-  let tokens = 0;
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 0;
-    tokens += isCjkCodePoint(code)
-      ? 1
-      : codePointUtf8Bytes(code) / OTHER_BYTES_PER_TOKEN;
-  }
-  return Math.ceil(tokens);
 }
 
 export function preflightPart(text: string): PreflightPart {
@@ -372,6 +331,7 @@ export function cloneTranscript(transcript: TranscriptResult): TranscriptResult 
     items.map((item) => ({
       ...item,
       secondaryReasons: [...item.secondaryReasons],
+      ...(item.source ? { source: { ...item.source } } : {}),
     }));
   return {
     ...transcript,
@@ -380,6 +340,12 @@ export function cloneTranscript(transcript: TranscriptResult): TranscriptResult 
       toolCalls: cloneItems(transcript.reviewerEvidence.toolCalls),
       relevantResults: cloneItems(transcript.reviewerEvidence.relevantResults),
     },
+    ...(transcript.rawUserAuthorization ? {
+      rawUserAuthorization: {
+        ...transcript.rawUserAuthorization,
+        sources: transcript.rawUserAuthorization.sources.map((item) => ({ ...item })),
+      },
+    } : {}),
     budgetRemovals: transcript.budgetRemovals.map((item) => ({ ...item })),
     selectedCandidates: transcript.selectedCandidates.map((item) => ({
       ...item,
@@ -423,7 +389,10 @@ export function refreshBudgetedTranscript(transcript: TranscriptResult): void {
       (total, item) => total + item.content.length,
       0,
     );
-  if (transcript.budgetRemovals.length > 0) transcript.truncated = true;
+  if (transcript.budgetRemovals.length > 0) {
+    transcript.truncated = true;
+    transcript.optionalHistoryOmittedOrTruncated = true;
+  }
 }
 
 export function applyReviewerInputBudget(
@@ -468,6 +437,18 @@ export function applyReviewerInputBudget(
   recordBudgetRemoval(transcript, "secondary-reasons", secondaryReasonCount);
   refreshBudgetedTranscript(transcript);
   if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
+
+  for (let index = 0; index < transcript.reviewerEvidence.userMessages.length;) {
+    const item = transcript.reviewerEvidence.userMessages[index];
+    if (!item || item.reason !== "actor-reference") {
+      index++;
+      continue;
+    }
+    transcript.reviewerEvidence.userMessages.splice(index, 1);
+    recordBudgetRemoval(transcript, "optional-user-history", 1);
+    refreshBudgetedTranscript(transcript);
+    if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
+  }
 
   for (let index = 0; index < transcript.reviewerEvidence.toolCalls.length;) {
     const item = transcript.reviewerEvidence.toolCalls[index];

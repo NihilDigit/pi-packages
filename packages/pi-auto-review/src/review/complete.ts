@@ -91,13 +91,12 @@ export async function complete(
     config.maxReviewerInputTokens,
   );
   // Hard denies already ran on the raw text plus bounded payloads. An
-  // incomplete expansion must reach the human terminal, even with a trusted
-  // reviewer-retry override. The older display-truncation fallback can still
-  // be lifted by that override.
+  // incomplete expansion or action must reach the human terminal, even with
+  // a trusted reviewer-retry override: authorization cannot supply missing text.
   const deferralReason = commandExpansionLimitExceeded(request)
     ? "Nested command expansion exceeds the local scan budget; a human must decide."
-    : reviewerRequestView(request).fullCommandTruncated && !reviewerContext?.userOverride
-      ? "The complete command exceeds the reviewer input bound and was truncated; a human must decide."
+    : reviewerRequestView(request).fullCommandTruncated
+      ? "The supplied command facts are incomplete; a human must decide."
       : undefined;
   if (deferralReason) {
     const deferredSummary: ReviewExecutionSummary = {
@@ -143,12 +142,10 @@ export async function complete(
   });
 
   try {
-    // A budget preflight failure is a sizing estimate, not a safety verdict.
-    // When a human explicitly authorized this exact retry, their decision
-    // must not be vetoed by an estimator: proceed with the truncated
-    // evidence and let the reviewer see the override. The failureCode stays
-    // on the transcript for observability.
-    if (transcript.failureCode && !reviewerContext?.userOverride) {
+    // An exact-retry override supplies authorization, not missing evidence or
+    // extra input capacity. Required evidence/global-cap failures always stop
+    // before model resolution, authentication, or a provider call.
+    if (transcript.failureCode) {
       incrementError(errorCounts, transcript.failureCode);
       throw new ReviewExecutionError(
         transcript.failureCode,

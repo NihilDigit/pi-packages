@@ -1,4 +1,5 @@
 import { isPathSurface } from "./path-surfaces.ts";
+import { estimateReviewerTokens, reviewerTokenPrefix } from "./review/token-estimate.ts";
 import {
   shellExpansionLimitExceeded,
   structuralScanText,
@@ -81,6 +82,7 @@ export type TranscriptResult = {
   toolCharacters: number;
   relevantResultCharacters: number;
   truncated: boolean;
+  optionalHistoryOmittedOrTruncated?: boolean;
   selectedCandidates: EvidenceCandidateMetadata[];
   failureCode?:
     | "critical_evidence_overflow"
@@ -89,13 +91,23 @@ export type TranscriptResult = {
   userAuthorizationCeiling: "unknown" | "low" | "medium" | "high";
   userConstraint: "none" | "narrowed" | "revoked";
   compactionState: "none" | "summary-present" | "authorization-unavailable";
+  rawUserAuthorization?: {
+    status: "complete" | "incomplete" | "unavailable";
+    sources: Array<{
+      id: string;
+      entryIndex: number;
+      provenance: "raw-user-message";
+      complete: boolean;
+    }>;
+  };
 };
 
 export type ReviewerBudgetRemoval = {
   reason:
     | "secondary-reasons"
     | "older-structured-tool"
-    | "optional-result";
+    | "optional-result"
+    | "optional-user-history";
   count: number;
 };
 
@@ -105,6 +117,11 @@ export type ReviewerEvidenceItem = {
   secondaryReasons: EvidenceSelectionReason[];
   toolCallId?: string;
   content: string;
+  source?: {
+    entryIndex: number;
+    provenance: "raw-user-message";
+    complete: boolean;
+  };
 };
 
 type Evidence = {
@@ -137,6 +154,7 @@ export type EvidenceSensitivity =
 export type EvidenceSelectionReason =
   | "latest-user"
   | "exact-request-reference"
+  | "actor-reference"
   | "trusted-retry-user-message"
   | "exact-tool-call"
   | "structured-request-match"
@@ -719,7 +737,7 @@ function boundedString(value: unknown): string {
 
 function userText(message: Record<string, unknown>): string {
   if (message.role !== "user") return "";
-  if (typeof message.content === "string") return message.content.trim();
+  if (typeof message.content === "string") return message.content;
   if (!Array.isArray(message.content)) return "";
   return message.content
     .filter(
@@ -728,8 +746,7 @@ function userText(message: Record<string, unknown>): string {
     )
     .filter((part) => part.type === "text" && typeof part.text === "string")
     .map((part) => String(part.text))
-    .join("\n")
-    .trim();
+    .join("\n");
 }
 
 function toolTexts(
@@ -753,7 +770,7 @@ function toolTexts(
     return [{
       id,
       name: record.name,
-      text: `${record.name} ${boundedString(record.arguments ?? {})}`,
+      text: `${record.name} ${JSON.stringify(record.arguments ?? {})}`,
     }];
   });
 }
@@ -768,18 +785,22 @@ function extractEvidence(entries: readonly unknown[]): Evidence[] {
     }
     const record = message as Record<string, unknown>;
     const user = userText(record);
-    if (user) {
+    if (user.trim()) {
       evidence.push({
         id: `${stableEntryId(entry, entryIndex)}:user`,
         index: evidence.length,
         entryIndex,
         kind: "user",
-        text: boundedString(user),
+        text: user,
         reason: "latest-user",
         secondaryReasons: [],
         sensitivity: "user-intent",
         originalCharacters: user.length,
-        preTruncated: boundedString(user).length < user.length,
+        preTruncated: Array.isArray(record.content) && record.content.some(
+          (part: unknown) => !part || typeof part !== "object" ||
+            !("type" in part) || part.type !== "text" ||
+            !("text" in part) || typeof part.text !== "string",
+        ),
       });
     }
     for (const tool of toolTexts(record)) {
@@ -1004,6 +1025,7 @@ function relevantResultEvidence(
     EvidenceSelectionReason,
     | "latest-user"
     | "exact-request-reference"
+    | "actor-reference"
     | "trusted-retry-user-message"
     | "exact-tool-call"
     | "structured-request-match"
@@ -1358,11 +1380,11 @@ function selectRequestAwareTools(
 
   const priority: EvidenceSelectionReason[] = [
     "exact-tool-call",
+    "security-combination",
     "same-tool",
     "delete-precheck",
     "git-push-context",
     "provider-branch-protection",
-    "security-combination",
     "structured-request-match",
   ];
   const selected = evidence
@@ -1476,7 +1498,7 @@ function selectedMetadata(
     surfaceProfile: profile,
     originalCharacters: original.originalCharacters,
     selectedCharacters: item.text.length,
-    estimatedTokens: Buffer.byteLength(item.text, "utf8"),
+    estimatedTokens: estimateReviewerTokens(item.text),
     truncated:
       original.preTruncated ||
       item.text.length <
@@ -1491,46 +1513,9 @@ type UserSelection = {
   authorizationCeiling: TranscriptResult["userAuthorizationCeiling"];
   constraint: TranscriptResult["userConstraint"];
   compactionState: TranscriptResult["compactionState"];
+  rawUserAuthorization: NonNullable<TranscriptResult["rawUserAuthorization"]>;
+  optionalHistoryOmittedOrTruncated: boolean;
 };
-
-function utf8Prefix(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  let bytes = 0;
-  let result = "";
-  for (const character of value) {
-    const size = Buffer.byteLength(character, "utf8");
-    if (bytes + size > maxBytes) break;
-    result += character;
-    bytes += size;
-  }
-  return result;
-}
-
-function utf8Suffix(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  let bytes = 0;
-  const characters = [...value];
-  let result = "";
-  for (let index = characters.length - 1; index >= 0; index--) {
-    const character = characters[index];
-    if (!character) continue;
-    const size = Buffer.byteLength(character, "utf8");
-    if (bytes + size > maxBytes) break;
-    result = character + result;
-    bytes += size;
-  }
-  return result;
-}
-
-function headTail(value: string, limit: number): string {
-  if (Buffer.byteLength(value, "utf8") <= limit) return value;
-  const marker = "\n…[middle truncated]…\n";
-  const markerBytes = Buffer.byteLength(marker, "utf8");
-  if (limit <= markerBytes) return utf8Prefix(marker, limit);
-  const available = limit - markerBytes;
-  const head = Math.ceil(available / 2);
-  return `${utf8Prefix(value, head)}${marker}${utf8Suffix(value, available - head)}`;
-}
 
 function summaryEntryIndices(entries: readonly unknown[]): number[] {
   const indices: number[] = [];
@@ -1558,23 +1543,31 @@ function exactUserReference(
     request.id,
     request.toolCallId,
     request.requesterSessionId,
-    request.agentName,
   ].some((value) => {
     if (typeof value !== "string" || value.length === 0) return false;
     return containsExactIdentifier(text, value);
   });
 }
 
-
 function selectUserEvidence(
   entries: readonly unknown[],
   evidence: Evidence[],
   request: RelevantBoundaryRequest,
-  budgetTokens: number,
+  optionalBudgetTokens: number,
 ): UserSelection {
   const users = evidence.filter((item) => item.kind === "user");
   const summaries = summaryEntryIndices(entries);
   const lastSummary = summaries.at(-1) ?? -1;
+  let latestRawEntry = -1;
+  entries.forEach((entry, index) => {
+    if (index > lastSummary && messageRecord(entry)?.role === "user") latestRawEntry = index;
+  });
+  const unavailableSource = latestRawEntry >= 0 ? [{
+    id: `${stableEntryId(entries[latestRawEntry], latestRawEntry)}:user`,
+    entryIndex: latestRawEntry,
+    provenance: "raw-user-message" as const,
+    complete: false,
+  }] : [];
   const rawAfterSummary = users.filter((item) => item.entryIndex > lastSummary);
   const eligibleUsers = lastSummary >= 0 ? rawAfterSummary : users;
   const latest = eligibleUsers.at(-1);
@@ -1584,7 +1577,7 @@ function selectUserEvidence(
       : latest
         ? "summary-present"
         : "authorization-unavailable";
-  if (!latest || budgetTokens <= 0) {
+  if (!latest) {
     return {
       selected: [],
       truncated: users.length > 0,
@@ -1593,11 +1586,13 @@ function selectUserEvidence(
         : "unknown",
       constraint: "none",
       compactionState,
+      rawUserAuthorization: { status: "unavailable", sources: unavailableSource },
+      optionalHistoryOmittedOrTruncated: false,
     };
   }
 
-  let remaining = budgetTokens;
-  const latestText = headTail(latest.text, remaining);
+  // Latest intent and exact-reference raw authorization are mandatory. The
+  // optional-history quotas must not clip them; the complete prompt cap wins.
   const latestTrustedRetry = Boolean(
     request.trustedRetryOriginalRequestId &&
       latest.text.includes("I approved one reviewer retry") &&
@@ -1609,18 +1604,16 @@ function selectUserEvidence(
   const latestExactReference = exactUserReference(latest.text, request);
   const selected: Evidence[] = [{
     ...latest,
-    text: latestText,
     reason: "latest-user",
     secondaryReasons: [
       ...(latestTrustedRetry ? ["trusted-retry-user-message" as const] : []),
       ...(latestExactReference ? ["exact-request-reference" as const] : []),
     ],
   }];
-  remaining -= Buffer.byteLength(latestText, "utf8");
-
+  let optionalRemaining = optionalBudgetTokens;
+  let optionalOmitted = false;
   const older = eligibleUsers.slice(0, -1).reverse();
   for (const candidate of older) {
-    if (remaining <= 0) break;
     const trustedRetry = Boolean(
       request.trustedRetryOriginalRequestId &&
         candidate.text.includes("I approved one reviewer retry") &&
@@ -1630,15 +1623,23 @@ function selectUserEvidence(
         ),
     );
     const exactReference = exactUserReference(candidate.text, request);
-    if (!trustedRetry && !exactReference) continue;
+    const actorReference = Boolean(request.agentName &&
+      containsExactIdentifier(candidate.text, request.agentName));
+    if (!trustedRetry && !exactReference && !actorReference) continue;
     const reason: EvidenceSelectionReason = trustedRetry
       ? "trusted-retry-user-message"
-      : "exact-request-reference";
-    const text = headTail(candidate.text, remaining);
-    if (!text) continue;
+      : exactReference ? "exact-request-reference" : "actor-reference";
+    if (reason === "actor-reference") {
+      const tokens = estimateReviewerTokens(candidate.text);
+      // Keep optional raw messages whole: clipping can hide a later constraint.
+      if (tokens > optionalRemaining) {
+        optionalOmitted = true;
+        continue;
+      }
+      optionalRemaining -= tokens;
+    }
     selected.push({
       ...candidate,
-      text,
       reason,
       secondaryReasons: [
         ...(trustedRetry && exactReference
@@ -1646,53 +1647,54 @@ function selectUserEvidence(
           : []),
       ],
     });
-    remaining -= Buffer.byteLength(text, "utf8");
   }
   selected.sort((left, right) => left.entryIndex - right.entryIndex);
-  const latestTruncated =
-    latestText.length < latest.originalCharacters || latest.preTruncated;
+  const mandatory = selected.filter((item) => item.reason !== "actor-reference");
+  const incomplete = latestRawEntry > latest.entryIndex ||
+    mandatory.some((item) => item.preTruncated);
   return {
     selected,
-    truncated:
-      latestTruncated ||
-      selected.some((item) => item.text.length < item.originalCharacters),
+    truncated: incomplete || optionalOmitted || selected.some((item) => item.preTruncated),
+    optionalHistoryOmittedOrTruncated: optionalOmitted ||
+      selected.some((item) => item.reason === "actor-reference" && item.preTruncated),
     authorizationCeiling: "high",
     constraint: "none",
     compactionState,
+    rawUserAuthorization: {
+      status: incomplete ? "incomplete" : "complete",
+      sources: [
+        ...mandatory.map((item) => ({
+          id: item.id,
+          entryIndex: item.entryIndex,
+          provenance: "raw-user-message" as const,
+          complete: !item.preTruncated,
+        })),
+        ...(latestRawEntry > latest.entryIndex ? unavailableSource : []),
+      ],
+    },
   };
 }
 
 function selectEvidence(
   evidence: Evidence[],
-  kind: Evidence["kind"],
   budgetTokens: number,
 ): { selected: Evidence[]; truncated: boolean } {
-  const candidates = evidence.filter((item) => item.kind === kind);
-  if (candidates.length === 0 || budgetTokens <= 0) {
-    return { selected: [], truncated: candidates.length > 0 };
-  }
-
-  const selected = new Map<number, Evidence>();
+  const candidates = evidence;
+  const mandatory = candidates.filter((item) =>
+    item.reason === "exact-tool-call" || item.reason === "security-combination");
+  const selected = new Map<number, Evidence>(
+    mandatory.map((item) => [item.index, item]),
+  );
   let remaining = budgetTokens;
   const add = (item: Evidence, limit = remaining): void => {
     if (selected.has(item.index) || remaining <= 0) return;
-    const text = utf8Prefix(item.text, Math.min(remaining, limit));
+    const text = reviewerTokenPrefix(boundedString(item.text), Math.min(remaining, limit));
     if (!text) return;
     selected.set(item.index, { ...item, text });
-    remaining -= Buffer.byteLength(text, "utf8");
+    remaining -= estimateReviewerTokens(text);
   };
 
-  // Keep the original user intent as an anchor, then fill from newest to oldest.
-  if (kind === "user") {
-    const firstBudget =
-      candidates.length > 1
-        ? Math.max(1, Math.floor(budgetTokens / 2))
-        : budgetTokens;
-    const first = candidates[0];
-    if (first) add(first, firstBudget);
-    const last = candidates[candidates.length - 1];
-    if (candidates.length > 1 && last) add(last);
-  }
+  // Only optional history spends this quota; mandatory evidence is untouched.
   for (let index = candidates.length - 1; index >= 0; index--) {
     const candidate = candidates[index];
     if (candidate) add(candidate);
@@ -1737,7 +1739,6 @@ export function buildClassifierTranscript(
   );
   const tools = selectEvidence(
     requestAwareTools.selected,
-    "tool",
     config.maxToolTranscriptTokens,
   );
   const relevantBudget =
@@ -1773,7 +1774,6 @@ export function buildClassifierTranscript(
       })),
   ];
   let relevantRemaining = relevantBudget;
-  let requiredProfileOverflow = false;
   const relevantSelected: Array<
     (typeof relevantCandidates)[number] & { selectedText: string }
   > = [];
@@ -1784,18 +1784,13 @@ export function buildClassifierTranscript(
       .sort((left, right) => right.index - left.index),
   ];
   for (const candidate of relevantSelectionOrder) {
-    if (relevantRemaining <= 0) break;
-    if (
-      candidate.reason === "sandbox-trap" &&
-      Buffer.byteLength(candidate.text, "utf8") > relevantRemaining
-    ) {
-      requiredProfileOverflow = true;
-      break;
-    }
-    const text = utf8Prefix(candidate.text, relevantRemaining);
+    const mandatory = candidate.reason === "sandbox-trap";
+    const text = mandatory
+      ? candidate.text
+      : reviewerTokenPrefix(candidate.text, relevantRemaining);
     if (text) {
       relevantSelected.push({ ...candidate, selectedText: text });
-      relevantRemaining -= Buffer.byteLength(text, "utf8");
+      if (!mandatory) relevantRemaining -= estimateReviewerTokens(text);
     }
   }
   relevantSelected.sort((left, right) => left.index - right.index);
@@ -1863,6 +1858,11 @@ export function buildClassifierTranscript(
         reason: item.reason,
         secondaryReasons: [...item.secondaryReasons],
         content: item.text,
+        source: {
+          entryIndex: item.entryIndex,
+          provenance: "raw-user-message",
+          complete: !item.preTruncated,
+        },
       })),
       toolCalls: finalTools.map((item) => ({
         id: item.id,
@@ -1899,6 +1899,9 @@ export function buildClassifierTranscript(
       0,
     ),
     truncated,
+    optionalHistoryOmittedOrTruncated:
+      users.optionalHistoryOmittedOrTruncated || tools.truncated ||
+      finalTools.length < tools.selected.length || relevantTruncated,
     selectedCandidates: [
       ...users.selected.map((item) =>
         selectedMetadata(
@@ -1924,18 +1927,17 @@ export function buildClassifierTranscript(
         surfaceProfile: profile,
         originalCharacters: item.rawCharacters,
         selectedCharacters: item.selectedText.length,
-        estimatedTokens: Buffer.byteLength(item.selectedText, "utf8"),
+        estimatedTokens: estimateReviewerTokens(item.selectedText),
         truncated: item.selectedText.length < item.rawCharacters,
         sensitivity: item.sensitivity,
       })),
     ].sort((left, right) => left.entryIndex - right.entryIndex),
     ...(requestAwareTools.criticalEvidenceOverflow
       ? { failureCode: "critical_evidence_overflow" as const }
-      : requiredProfileOverflow
-        ? { failureCode: "required_profile_overflow" as const }
-        : {}),
+      : {}),
     userAuthorizationCeiling: users.authorizationCeiling,
     userConstraint: users.constraint,
     compactionState: users.compactionState,
+    rawUserAuthorization: users.rawUserAuthorization,
   };
 }

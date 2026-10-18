@@ -1089,6 +1089,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       const envelope = JSON.parse(prompt) as Record<string, unknown>;
       assert.deepEqual(Object.keys(envelope), [
         "evidence",
+        "mandatoryEvidence",
         "omissions",
         "profile",
         "request",
@@ -1936,24 +1937,28 @@ test("real permission-system authorizer chain integration", async (t) => {
     }
   });
 
-  await t.test("an over-bound command defers without calling the model", async () => {
+  await t.test("an 11000-byte ASCII command reaches the reviewer complete within the global cap", async () => {
     const instance = harness(allow);
     try {
-      const oversized = "x".repeat(10_240 + 50);
+      const oversized = "x".repeat(11_000);
       const result = await instance.authorize("bash_escalated", {
         requestId: "command-over-bound",
         command: oversized,
       });
-      assert.equal(result.decision.approved, false);
-      assert.equal(instance.modelContexts.length, 0);
-      assert.equal(instance.reviewerResolveCalls, 0);
+      assert.equal(result.decision.approved, true);
+      assert.equal(instance.modelContexts.length, 1);
+      assert.equal(instance.reviewerResolveCalls, 1);
+      const envelope = JSON.parse(reviewerTranscript(instance.modelContexts[0]).userPrompt);
+      assert.equal(envelope.request.command, oversized);
+      assert.equal(envelope.request.fullCommandTruncated, undefined);
+      assert.equal(envelope.mandatoryEvidence.currentAction.complete, true);
       const completion = instance.telemetry.find(
         (event) =>
           event.type === "review_complete" &&
           event.requestId === "command-over-bound",
       );
-      assert.equal(completion?.outcome, "defer");
-      assert.equal(completion?.attempts, 0);
+      assert.equal(completion?.outcome, "allow");
+      assert.equal(completion?.attempts, 1);
       assert.equal(
         (completion?.transcript as Record<string, unknown>).failureCode,
         undefined,
@@ -2153,10 +2158,9 @@ test("real permission-system authorizer chain integration", async (t) => {
     }
   });
 
-  await t.test("a human override bypasses the input-budget preflight failure", async () => {
-    // Without the override the CJK payload cannot fit the tiny budget and the
-    // review fails closed before any model call; with the override the exact
-    // retry must reach the reviewer instead of being vetoed by an estimate.
+  await t.test("an exact human override cannot bypass required input overflow", async () => {
+    // Authorization adds no capacity: neither the first attempt nor the exact
+    // retry may resolve a model or send an incomplete/oversized mandatory input.
     const cjkPreview = "中文计划文档，包含大量授权边界描述。".repeat(500);
     const instance = harness(allow, {
       config: config({ maxReviewerInputTokens: 2_048 }),
@@ -2196,12 +2200,17 @@ test("real permission-system authorizer chain integration", async (t) => {
         requestId: "cjk-budget-override",
         toolInputPreview: cjkPreview,
       });
-      assert.equal(retry.decision.approved, true);
+      assert.equal(retry.decision.approved, false);
       const retryCompletion = instance.telemetry.filter(
         (event) => event.type === "review_complete",
       ).at(-1);
-      assert.equal(retryCompletion?.attempts, 1);
-      assert.equal(retryCompletion?.outcome, "allow");
+      assert.equal(retryCompletion?.attempts, 0);
+      assert.equal(instance.reviewerResolveCalls, 0);
+      assert.equal(instance.modelContexts.length, 0);
+      assert.equal(
+        (retryCompletion?.transcript as Record<string, unknown>).failureCode,
+        "reviewer_input_budget_exceeded",
+      );
     } finally {
       instance.dispose();
     }
@@ -2305,7 +2314,7 @@ test("real permission-system authorizer chain integration", async (t) => {
     }
   });
 
-  await t.test("truncated latest user evidence does not cap a model allow", async () => {
+  await t.test("mandatory latest user evidence is complete despite a tiny optional quota", async () => {
     const instance = harness(highRiskAllow, {
       config: config({ maxUserTranscriptTokens: 32 }),
       contextEntries: [

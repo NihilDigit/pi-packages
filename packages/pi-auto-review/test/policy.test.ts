@@ -9,8 +9,7 @@ import {
   normalizePermissionEvidence,
   parseDecision,
 } from "../src/policy.ts";
-import { reviewerRequestView } from "../src/review/input.ts";
-import { MAX_REVIEWER_COMMAND_BYTES } from "../src/review/shell-text.ts";
+import { estimateReviewerTokens, reviewerRequestView } from "../src/review/input.ts";
 
 test("detailed decisions require an exact consistent schema", () => {
   assert.deepEqual(
@@ -847,8 +846,8 @@ test("deterministic hard deny scans the executed program, not just the gated uni
   );
 });
 
-test("the reviewer request view truncates command facts and flags it", () => {
-  const oversized = "x".repeat(MAX_REVIEWER_COMMAND_BYTES + 100);
+test("the reviewer request view preserves complete command facts beyond the old byte cap", () => {
+  const oversized = "x".repeat(11_000);
   const view = reviewerRequestView({
     id: "reviewer-view",
     source: "permission-system",
@@ -858,11 +857,8 @@ test("the reviewer request view truncates command facts and flags it", () => {
     command: "python3",
     fullCommand: oversized,
   });
-  assert.equal(view.fullCommandTruncated, true);
-  assert.equal(
-    Buffer.byteLength(view.fullCommand ?? "", "utf8"),
-    MAX_REVIEWER_COMMAND_BYTES,
-  );
+  assert.equal(view.fullCommandTruncated, undefined);
+  assert.equal(view.fullCommand, oversized);
   assert.equal(view.command, "python3");
 
   const small = reviewerRequestView({
@@ -1050,7 +1046,7 @@ test("an unrelated long first message never consumes latest-intent budget", () =
   assert.equal(transcript.truncated, false);
 });
 
-test("latest user truncation preserves head and tail", () => {
+test("latest raw authorization is mandatory and never clipped by optional quotas", () => {
   const latest = `HEAD-AUTH ${"x".repeat(200)} TAIL-REVOKE`;
   const transcript = buildClassifierTranscript(
     [{ id: "latest-entry", message: { role: "user", content: latest } }],
@@ -1059,7 +1055,8 @@ test("latest user truncation preserves head and tail", () => {
   );
   assert.match(transcript.text, /HEAD-AUTH/);
   assert.match(transcript.text, /TAIL-REVOKE/);
-  assert.match(transcript.text, /middle truncated/);
+  assert.doesNotMatch(transcript.text, /middle truncated/);
+  assert.equal(transcript.reviewerEvidence.userMessages[0]?.content, latest);
   assert.equal(transcript.userAuthorizationCeiling, "high");
   assert.deepEqual(transcript.selectedCandidates.map((candidate) => ({
     id: candidate.id,
@@ -1072,9 +1069,9 @@ test("latest user truncation preserves head and tail", () => {
     id: "entry:latest-entry:user",
     reason: "latest-user",
     originalCharacters: latest.length,
-    selectedCharacters: 76,
-    estimatedTokens: 80,
-    truncated: true,
+    selectedCharacters: latest.length,
+    estimatedTokens: estimateReviewerTokens(latest),
+    truncated: false,
   }]);
 });
 
@@ -1320,7 +1317,8 @@ test("same tool-call evidence is selected by exact call id and remains bounded",
   );
   assert.match(transcript.text, /reason="same-tool"/);
   assert.match(transcript.text, /exact-result &lt;\/tool-result&gt;/);
-  assert.ok(transcript.relevantResultCharacters <= 120);
+  assert.ok(transcript.selectedCandidates.filter((item) => item.kind === "tool-result")
+    .reduce((total, item) => total + item.estimatedTokens, 0) <= 120);
   assert.equal(transcript.truncated, true);
 });
 
@@ -1665,7 +1663,7 @@ test("Sandbox Runtime trap supplements only process evidence missing from the re
   );
 });
 
-test("Sandbox Runtime required profile fails closed when its category budget is too small", () => {
+test("Sandbox Runtime required profile does not spend optional result quota", () => {
   const transcript = buildClassifierTranscript(
     [],
     {
@@ -1682,8 +1680,8 @@ test("Sandbox Runtime required profile fails closed when its category budget is 
       toolName: "/usr/bin/touch",
     },
   );
-  assert.equal(transcript.failureCode, "required_profile_overflow");
-  assert.doesNotMatch(transcript.text, /<sandbox-trap>/);
+  assert.equal(transcript.failureCode, undefined);
+  assert.match(transcript.text, /<sandbox-trap>/);
 });
 
 test("Sandbox Runtime adds no trap block when the canonical request is complete", () => {
