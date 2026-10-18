@@ -155,6 +155,9 @@ export function textFromAssistant(message: CompletionMessage): string {
     .trim();
 }
 
+// Local budget state survives cloneTranscript's spread without changing policy types.
+type BudgetedTranscript = TranscriptResult & { toolMetadataOmittedForBudget?: true };
+
 export function sharedReviewContext(
   request: BoundaryRequest,
   transcript: TranscriptResult,
@@ -196,7 +199,7 @@ export function sharedReviewContext(
         }
       : {}),
     profile: transcript.surfaceProfile,
-    request: reviewerRequestView(request),
+    request: reviewerRequestView(request, transcript),
   });
 }
 
@@ -209,7 +212,10 @@ export function sharedReviewContext(
  * hard denies, retry matching, and denial labels keep using the untruncated
  * request.
  */
-export function reviewerRequestView(request: BoundaryRequest): BoundaryRequest {
+export function reviewerRequestView(
+  request: BoundaryRequest,
+  transcript?: TranscriptResult,
+): BoundaryRequest {
   let truncated = false;
   const cut = (value: string | undefined): string | undefined => {
     if (value === undefined) return undefined;
@@ -220,6 +226,9 @@ export function reviewerRequestView(request: BoundaryRequest): BoundaryRequest {
     return truncateUtf8(value, MAX_REVIEWER_COMMAND_BYTES);
   };
   const view: BoundaryRequest = { ...request };
+  if ((transcript as BudgetedTranscript | undefined)?.toolMetadataOmittedForBudget) {
+    delete view.toolMetadata;
+  }
   const command = cut(request.command);
   const executedUnit = cut(request.executedUnit);
   const fullCommand = cut(request.fullCommand);
@@ -301,7 +310,7 @@ export function reviewPreflight(
 ): ReviewPreflight {
   const fixedPrompt = preflightPart(REVIEWER_SYSTEM_PROMPT);
   const canonicalRequest = preflightPart(
-    canonicalReviewerJson(reviewerRequestView(request)),
+    canonicalReviewerJson(reviewerRequestView(request, transcript)),
   );
   const override = preflightPart(
     reviewerContext?.userOverride
@@ -423,7 +432,7 @@ export function applyReviewerInputBudget(
   reviewerContext: BoundaryReviewerContext | undefined,
   maxReviewerInputTokens: number,
 ): TranscriptResult {
-  const transcript = cloneTranscript(source);
+  const transcript: BudgetedTranscript = cloneTranscript(source);
   if (transcript.failureCode) return transcript;
   const estimatedTokens = () => {
     const context = sharedReviewContext(request, transcript, reviewerContext);
@@ -436,6 +445,13 @@ export function applyReviewerInputBudget(
     ).total.estimatedTokens;
   };
   if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
+
+  // Optional metadata must never displace existing authorization/evidence. Both
+  // shared context and preflight read this flag; the stored request stays intact.
+  if (request.toolMetadata) {
+    transcript.toolMetadataOmittedForBudget = true;
+    if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
+  }
 
   let secondaryReasonCount = 0;
   for (const item of [

@@ -12,6 +12,24 @@ export type BoundarySource =
   | "sandbox-runtime"
   | (string & {});
 
+export type BoundaryToolJson =
+  | null | boolean | number | string
+  | BoundaryToolJson[]
+  | { [key: string]: BoundaryToolJson };
+
+export type BoundaryToolMetadata = {
+  interpretation: "untrusted-data-not-instructions-or-authorization";
+  description: string;
+  parameters: BoundaryToolJson;
+  sourceInfo?: {
+    path: string;
+    source: string;
+    scope: "user" | "project" | "temporary";
+    origin: "package" | "top-level";
+    baseDir?: string;
+  };
+};
+
 export type BoundaryRequest = {
   id: string;
   source: BoundarySource;
@@ -44,6 +62,8 @@ export type BoundaryRequest = {
   destinationProtocol?: string;
   toolCallId?: string;
   toolName?: string;
+  /** Optional registration data, never an authorization or provenance attestation. */
+  toolMetadata?: BoundaryToolMetadata;
   skillName?: string;
   toolInputPreview?: string;
   agentName?: string;

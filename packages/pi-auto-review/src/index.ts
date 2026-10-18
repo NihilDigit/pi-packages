@@ -88,6 +88,7 @@ import {
   type ReviewerTelemetryEvent,
 } from "./review/index.ts";
 import { ReviewExecutionError } from "./review/index.ts";
+import { withRegisteredToolMetadata } from "./review/tool-metadata.ts";
 
 export {
   applyProjectConfig,
@@ -744,7 +745,10 @@ export function createPiAutoReviewExtension(
             return { kind: "deny", reason };
           }
 
-          const request = boundaryRequest(context, details, query);
+          const request = withRegisteredToolMetadata(
+            boundaryRequest(context, details, query),
+            () => pi.getAllTools(),
+          );
           const target = reviewTargetFromRequest(request);
           const reviewContext = context;
           const widgetGeneration = reviewWidget.begin(request.id, reviewContext, {
