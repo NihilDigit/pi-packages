@@ -1255,10 +1255,19 @@ function exactToolCallReviewerRepresentation(
     return;
   }
   const args = call.arguments as Record<string, unknown>;
-  const serializedArgs = canonicalReviewerJson(args);
-  const previewCoversAll =
-    request.toolInputPreview === serializedArgs ||
-    request.toolInputPreview === `input ${serializedArgs}`;
+  let previewCoversAll = false;
+  const preview = request.toolInputPreview;
+  if (typeof preview === "string") {
+    try {
+      const parsed: unknown = JSON.parse(
+        preview.startsWith("input ") ? preview.slice(6) : preview,
+      );
+      previewCoversAll =
+        canonicalReviewerJson(parsed) === canonicalReviewerJson(args);
+    } catch {
+      // Incomplete or decorated previews cannot replace tool-call supplements.
+    }
+  }
   const supplement = previewCoversAll
     ? {}
     : Object.fromEntries(

@@ -44,7 +44,7 @@
   },
   "scripts": {
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --disable-warning=ExperimentalWarning --experimental-transform-types --import ./test/register-external-ts.mjs --test test/*.test.ts"
+    "test": "node --disable-warning=ExperimentalWarning --experimental-transform-types --import ./test/register-external-ts.mjs --test test/*.test.ts test/*.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "^1.1.0",
