@@ -883,7 +883,8 @@ test("real permission-system authorizer chain integration", async (t) => {
     for (const [output, approved, terminalCalls] of [
       [allow, true, 0],
       [deny, false, 0],
-      [defer, false, 1],
+      // A model cannot produce the runtime-only defer result.
+      [defer, false, 0],
     ] as const) {
       const instance = harness(output);
       try {
@@ -893,6 +894,21 @@ test("real permission-system authorizer chain integration", async (t) => {
       } finally {
         instance.dispose();
       }
+    }
+    const missing = harness(allow);
+    try {
+      const result = await missing.authorize("synthetic", {
+        toolName: "synthetic",
+        payload: buildToolAskPayload({
+          check: { toolName: "synthetic", state: "ask" },
+          agentName: null, surface: "synthetic",
+        }),
+      });
+      assert.equal(result.decision.approved, false);
+      assert.equal(result.terminalCalls, 1);
+      assert.equal(missing.modelContexts.length, 0);
+    } finally {
+      missing.dispose();
     }
   });
 
@@ -1071,7 +1087,8 @@ test("real permission-system authorizer chain integration", async (t) => {
       // Loose guard against unbounded prompt growth; the #910 matchedSpelling
       // sentence sits at ~2.0k characters, so keep headroom for doc tweaks.
       assert.ok(context.systemPrompt.length < 2_100);
-      assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 1);
+      // Public contract includes the minimal allow example plus detailed schema.
+      assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 2);
       assert.match(context.systemPrompt, /\$HOME/);
       assert.match(
         context.systemPrompt,
@@ -1079,7 +1096,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       );
       assert.match(
         context.systemPrompt,
-        /Allow high only with medium\/high user\s+authorization and narrow scope; else defer/,
+        /Allow high only with medium\/high user\s+authorization and narrow scope; else deny/,
       );
       assert.doesNotMatch(
         context.systemPrompt,
@@ -1323,7 +1340,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       },
       {
         name: "schema",
-        first: '{"outcome":"allow"}',
+        first: '{"outcome":"invalid"}',
         expectedClass: "schema",
         expectedCalls: 2,
       },

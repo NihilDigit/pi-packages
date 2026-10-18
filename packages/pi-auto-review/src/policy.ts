@@ -266,46 +266,37 @@ export function parseDecision(text: string): ModelDecision {
     throw new Error("reviewer returned a non-object");
   }
   const record = value as Record<string, unknown>;
-  if (
-    !exactKeys(record, [
-      "outcome",
-      "risk_level",
-      "user_authorization",
-      "rationale",
-    ])
-  ) {
+  const fields = ["outcome", "risk_level", "user_authorization", "rationale"];
+  if (!Object.hasOwn(record, "outcome") || Object.keys(record).some(key => !fields.includes(key))) {
     throw new Error("reviewer returned unexpected fields");
   }
-  if (!["allow", "deny", "defer"].includes(String(record.outcome))) {
+  // Public Codex CLI 0.162.0, c1382380, guardian-reviewer/assessment.rs:
+  // model wire outcomes are allow/deny; optional fields use these defaults.
+  // Runtime defer remains separate and cannot be supplied by the model.
+  if (record.outcome !== "allow" && record.outcome !== "deny") {
     throw new Error("reviewer returned an invalid outcome");
   }
-  if (
-    !["low", "medium", "high", "critical"].includes(
-      String(record.risk_level),
-    )
-  ) {
+  const riskLevel = record.risk_level ?? (record.outcome === "allow" ? "low" : "high");
+  const userAuthorization = record.user_authorization ?? "unknown";
+  if (typeof riskLevel !== "string" || !["low", "medium", "high", "critical"].includes(riskLevel)) {
     throw new Error("reviewer returned an invalid risk level");
   }
-  if (
-    !["unknown", "low", "medium", "high"].includes(
-      String(record.user_authorization),
-    )
-  ) {
+  if (typeof userAuthorization !== "string" || !["unknown", "low", "medium", "high"].includes(userAuthorization)) {
     throw new Error("reviewer returned invalid user authorization");
   }
-  if (
-    typeof record.rationale !== "string" ||
-    !record.rationale.trim() ||
-    record.rationale.length > 600
-  ) {
+  if (record.rationale != null && typeof record.rationale !== "string") {
     throw new Error("reviewer returned an invalid rationale");
   }
-
+  const rationale = typeof record.rationale === "string" && record.rationale.trim()
+    ? record.rationale
+    : record.outcome === "allow"
+      ? "Auto-review returned a low-risk allow decision."
+      : "Auto-review returned a deny decision without a rationale.";
   const decision = {
     outcome: record.outcome,
-    risk_level: record.risk_level,
-    user_authorization: record.user_authorization,
-    rationale: record.rationale.trim(),
+    risk_level: riskLevel,
+    user_authorization: userAuthorization,
+    rationale,
   } as ModelDecision;
   if (
     decision.outcome === "allow" &&
@@ -321,12 +312,6 @@ export function parseDecision(text: string): ModelDecision {
     throw new Error(
       "reviewer attempted an unauthorized high-risk allow",
     );
-  }
-  if (
-    decision.outcome === "defer" &&
-    !["medium", "high"].includes(decision.risk_level)
-  ) {
-    throw new Error("reviewer returned an inconsistent defer");
   }
   return decision;
 }

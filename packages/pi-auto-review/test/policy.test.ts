@@ -110,16 +110,16 @@ test("fenced reviewer output remains strictly schema-validated", () => {
       '```json\n{"outcome":"allow","risk_level":"critical","user_authorization":"high","rationale":"self-approved"}\n```',
     ),
   );
-  // A valid fenced decision still parses with trimmed rationale.
+  // A valid fenced denial preserves the official nonblank rationale string.
   assert.deepEqual(
     parseDecision(
-      '```json\n{"outcome":"defer","risk_level":"high","user_authorization":"low","rationale":"  uncertain  "}\n```',
+      '```json\n{"outcome":"deny","risk_level":"high","user_authorization":"low","rationale":"  uncertain  "}\n```',
     ),
     {
-      outcome: "defer",
+      outcome: "deny",
       risk_level: "high",
       user_authorization: "low",
-      rationale: "uncertain",
+      rationale: "  uncertain  ",
     },
   );
 });
