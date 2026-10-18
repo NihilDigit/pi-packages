@@ -62,6 +62,17 @@ export type BoundaryRequest = {
   destinationProtocol?: string;
   toolCallId?: string;
   toolName?: string;
+  /** Current runtime action, not UI prose or human authorization. */
+  toolAction?: {
+    version: 1;
+    toolName: string;
+    toolCallId: string;
+    input: unknown;
+    inputState: "complete" | "redacted";
+    source: { kind: "sdk-tool-call"; sessionId: string };
+    registration?: { description: string; parameters: unknown; sourceInfo?: unknown };
+  };
+  toolActionStatus?: "complete" | "redacted" | "unavailable" | "invalid";
   /** Optional registration data, never an authorization or provenance attestation. */
   toolMetadata?: BoundaryToolMetadata;
   skillName?: string;

@@ -97,7 +97,9 @@ export async function complete(
     ? "Nested command expansion exceeds the local scan budget; a human must decide."
     : reviewerRequestView(request).fullCommandTruncated
       ? "The supplied command facts are incomplete; a human must decide."
-      : undefined;
+      : request.toolActionStatus !== undefined && request.toolActionStatus !== "complete"
+        ? "The structured tool action is unavailable, inconsistent, or redacted; a human must decide."
+        : undefined;
   if (deferralReason) {
     const deferredSummary: ReviewExecutionSummary = {
       attempts: [],

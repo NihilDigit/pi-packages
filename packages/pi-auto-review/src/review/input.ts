@@ -30,6 +30,7 @@ import { REVIEWER_SYSTEM_PROMPT } from "./prompts.ts";
 import { applyProjectConfig } from "./config.ts";
 import { assertTrustedInstallation } from "./guards.ts";
 import { estimateReviewerTokens } from "./token-estimate.ts";
+import { toolActionFacts } from "./tool-action.ts";
 export { estimateReviewerTokens } from "./token-estimate.ts";
 
 export function sessionConfig(
@@ -125,16 +126,8 @@ export function boundaryRequest(
     destination: evidence.destination,
     destinationHost: destParsed?.host,
     destinationPort: destParsed?.port,
-    toolCallId:
-      typeof (details as unknown as Record<string, unknown>).toolCallId ===
-      "string"
-        ? String(
-            (details as unknown as Record<string, unknown>).toolCallId,
-          )
-        : undefined,
-    toolName: details.toolName,
+    ...toolActionFacts(details),
     skillName: details.skillName,
-    toolInputPreview: details.toolInputPreview,
     agentName: evidence.requester?.agentName,
     requesterSessionId: evidence.requester?.sessionId,
     accessIntent: evidence.accessIntent,
@@ -186,6 +179,7 @@ export function sharedReviewContext(
         : {}),
       evidenceOmittedOrTruncated:
         reviewerRequestView(request).fullCommandTruncated === true ||
+        (request.toolActionStatus !== undefined && request.toolActionStatus !== "complete") ||
         rawUserAuthorization.status !== "complete" ||
         transcript.failureCode === "critical_evidence_overflow" ||
         transcript.failureCode === "required_profile_overflow" ||
@@ -217,7 +211,9 @@ export function sharedReviewContext(
       currentAction: {
         id: request.id,
         provenance: "permission-boundary-request",
-        complete: reviewerRequestView(request).fullCommandTruncated !== true,
+        complete: reviewerRequestView(request).fullCommandTruncated !== true &&
+          (request.toolActionStatus === undefined || request.toolActionStatus === "complete"),
+        ...(request.toolActionStatus ? { toolInputStatus: request.toolActionStatus } : {}),
       },
       rawUserAuthorization,
     },

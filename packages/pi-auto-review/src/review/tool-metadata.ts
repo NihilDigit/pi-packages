@@ -72,7 +72,12 @@ export function withRegisteredToolMetadata(
 ): BoundaryRequest {
   try {
     if (!request.toolName || request.toolName.length > 256) return request;
-    const tools = getAllTools();
+    // Forwarded registrations describe the requesting runtime, not a same-name
+    // tool in the serving runtime. Both remain untrusted descriptive data.
+    const registration = request.toolAction?.registration;
+    const tools = registration
+      ? [{ name: request.toolAction!.toolName, ...registration }]
+      : getAllTools();
     if (!Array.isArray(tools) || tools.length > 512) return request;
     // The name is only a lookup key, not evidence of authority or implementation.
     const matches = tools.filter(tool => tool.name === request.toolName);
