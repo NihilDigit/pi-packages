@@ -1,7 +1,6 @@
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { EXTENSION_NAME, PACKAGE_ROOT, PROJECT_CONFIG_PATH } from "./consts.ts";
+import { agentDirectory, EXTENSION_NAME, PACKAGE_ROOT, PROJECT_CONFIG_PATH } from "./consts.ts";
 import { userConfigPath } from "./config.ts";
 import { pathSurfaceInfo } from "../path-surfaces.ts";
 import type { BoundaryRequest } from "../broker/index.ts";
@@ -24,13 +23,14 @@ export function protectedWriteHardDeny(
   const target = request.resolvedPath || request.path;
   if (!target) return;
   const resolvedTarget = resolve(request.cwd, target);
-  const agentDir = join(homedir(), ".pi", "agent");
+  const agentDir = agentDirectory();
   const protectedDirectories = [
     PACKAGE_ROOT,
     join(agentDir, "logs"),
     join(agentDir, "extensions", "pi-auto-review"),
   ];
   const protectedFiles = [
+    join(agentDir, "pi-thagoras.json"),
     join(request.cwd, PROJECT_CONFIG_PATH),
     userConfigPath(),
   ];

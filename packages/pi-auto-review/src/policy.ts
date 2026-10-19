@@ -73,6 +73,16 @@ export type TranscriptResult = {
   text: string;
   surfaceProfile: EvidenceSurfaceProfile;
   reviewerEvidence: {
+    assistantContext?: Array<{
+      id: string;
+      content: string;
+      beforeUserMessageId: string;
+      source: {
+        entryIndex: number;
+        provenance: "raw-assistant-message";
+        complete: boolean;
+      };
+    }>;
     userMessages: ReviewerEvidenceItem[];
     toolCalls: ReviewerEvidenceItem[];
     relevantResults: ReviewerEvidenceItem[];
@@ -107,6 +117,7 @@ export type ReviewerBudgetRemoval = {
     | "secondary-reasons"
     | "older-structured-tool"
     | "optional-result"
+    | "optional-assistant-context"
     | "optional-user-history";
   count: number;
 };
@@ -140,6 +151,7 @@ type Evidence = {
 };
 
 export type EvidenceSensitivity =
+  | "proposal-context"
   | "user-intent"
   | "tool-input"
   | "tool-output"
@@ -152,6 +164,8 @@ export type EvidenceSensitivity =
   | "security-control";
 
 export type EvidenceSelectionReason =
+  | "preceding-assistant"
+  | "recent-user-history"
   | "latest-user"
   | "exact-request-reference"
   | "actor-reference"
@@ -175,7 +189,7 @@ export type EvidenceSurfaceProfile =
 export type EvidenceCandidateMetadata = {
   id: string;
   entryIndex: number;
-  kind: "user" | "tool-call" | "tool-result" | "sandbox-trap";
+  kind: "user" | "tool-call" | "tool-result" | "sandbox-trap" | "assistant-context";
   toolCallId?: string;
   reason: EvidenceSelectionReason;
   secondaryReasons: EvidenceSelectionReason[];
@@ -1111,6 +1125,42 @@ function currentTurnStart(entries: readonly unknown[]): number {
   return start;
 }
 
+function precedingAssistantContext(
+  entries: readonly unknown[],
+  latestUser: Evidence | undefined,
+): NonNullable<TranscriptResult["reviewerEvidence"]["assistantContext"]> {
+  if (!latestUser) return [];
+  for (let index = latestUser.entryIndex - 1; index >= 0; index--) {
+    const message = messageRecord(entries[index]);
+    if (!message) continue;
+    if (message.role === "user" || message.role === "compactionSummary" ||
+        message.role === "branchSummary") break;
+    if (message.role !== "assistant") continue;
+    const parts = Array.isArray(message.content) ? message.content : [];
+    const content = typeof message.content === "string" ? message.content
+      : parts.flatMap((part) => {
+        if (!part || typeof part !== "object" || Array.isArray(part)) return [];
+        const value = part as Record<string, unknown>;
+        return value.type === "text" && typeof value.text === "string" ? [value.text] : [];
+      }).join("\n");
+    if (!content.trim()) continue;
+    // Preserve the visible reply whole; clipping can hide the proposal's limits.
+    // Thinking and tool calls are not a proposal. The full input cap still applies.
+    const complete = typeof message.content === "string" || parts.every((part) => {
+      if (!part || typeof part !== "object" || Array.isArray(part)) return false;
+      const value = part as Record<string, unknown>;
+      return value.type === "thinking" || value.type === "toolCall" ||
+        (value.type === "text" && typeof value.text === "string");
+    });
+    return [{
+      id: `${stableEntryId(entries[index], index)}:assistant`, content,
+      beforeUserMessageId: latestUser.id,
+      source: { entryIndex: index, provenance: "raw-assistant-message", complete },
+    }];
+  }
+  return [];
+}
+
 function surfaceProfile(
   request: RelevantBoundaryRequest,
 ): EvidenceSurfaceProfile {
@@ -1538,7 +1588,7 @@ function selectUserEvidence(
   entries: readonly unknown[],
   evidence: Evidence[],
   request: RelevantBoundaryRequest,
-  optionalBudgetTokens: number,
+  historyBudgetTokens: number,
 ): UserSelection {
   const users = evidence.filter((item) => item.kind === "user");
   const summaries = summaryEntryIndices(entries);
@@ -1595,7 +1645,6 @@ function selectUserEvidence(
       ...(latestExactReference ? ["exact-request-reference" as const] : []),
     ],
   }];
-  let optionalRemaining = optionalBudgetTokens;
   let optionalOmitted = false;
   const older = eligibleUsers.slice(0, -1).reverse();
   for (const candidate of older) {
@@ -1608,21 +1657,10 @@ function selectUserEvidence(
         ),
     );
     const exactReference = exactUserReference(candidate.text, request);
-    const actorReference = Boolean(request.agentName &&
-      containsExactIdentifier(candidate.text, request.agentName));
-    if (!trustedRetry && !exactReference && !actorReference) continue;
+    if (!trustedRetry && !exactReference) continue;
     const reason: EvidenceSelectionReason = trustedRetry
       ? "trusted-retry-user-message"
-      : exactReference ? "exact-request-reference" : "actor-reference";
-    if (reason === "actor-reference") {
-      const tokens = estimateReviewerTokens(candidate.text);
-      // Keep optional raw messages whole: clipping can hide a later constraint.
-      if (tokens > optionalRemaining) {
-        optionalOmitted = true;
-        continue;
-      }
-      optionalRemaining -= tokens;
-    }
+      : "exact-request-reference";
     selected.push({
       ...candidate,
       reason,
@@ -1633,15 +1671,25 @@ function selectUserEvidence(
       ],
     });
   }
+  let historyRemaining = historyBudgetTokens;
+  for (const candidate of older) {
+    if (selected.some((item) => item.id === candidate.id)) continue;
+    const tokens = estimateReviewerTokens(candidate.text);
+    if (candidate.preTruncated || tokens > historyRemaining) {
+      optionalOmitted = true;
+      break;
+    }
+    selected.push({ ...candidate, reason: "recent-user-history", secondaryReasons: [] });
+    historyRemaining -= tokens;
+  }
   selected.sort((left, right) => left.entryIndex - right.entryIndex);
-  const mandatory = selected.filter((item) => item.reason !== "actor-reference");
+  const mandatory = selected.filter((item) => item.reason !== "recent-user-history");
   const incomplete = latestRawEntry > latest.entryIndex ||
     mandatory.some((item) => item.preTruncated);
   return {
     selected,
     truncated: incomplete || optionalOmitted || selected.some((item) => item.preTruncated),
-    optionalHistoryOmittedOrTruncated: optionalOmitted ||
-      selected.some((item) => item.reason === "actor-reference" && item.preTruncated),
+    optionalHistoryOmittedOrTruncated: optionalOmitted,
     authorizationCeiling: "high",
     constraint: "none",
     compactionState,
@@ -1798,6 +1846,7 @@ export function buildClassifierTranscript(
   const selected = [...users.selected, ...finalTools].sort(
     (left, right) => left.index - right.index,
   );
+  const assistantContext = users.selected.flatMap((item) => precedingAssistantContext(entries, item));
   const baseRendered = selected
     .map((item) => {
       const attributes = item.kind === "tool"
@@ -1814,6 +1863,8 @@ export function buildClassifierTranscript(
         : "";
   const rendered = [
     authorizationNotice,
+    ...assistantContext.map((item) =>
+      `<assistant-context trust="untrusted" authorization="false">\n${escapeEvidenceMarkup(item.content)}\n</assistant-context>`),
     baseRendered,
     ...relevantSelected.map((candidate) => candidate.selectedText),
   ]
@@ -1838,6 +1889,7 @@ export function buildClassifierTranscript(
     text: text || "(no eligible transcript evidence)",
     surfaceProfile: profile,
     reviewerEvidence: {
+      ...(assistantContext.length ? { assistantContext } : {}),
       userMessages: users.selected.map((item) => ({
         id: item.id,
         reason: item.reason,
@@ -1888,6 +1940,19 @@ export function buildClassifierTranscript(
       users.optionalHistoryOmittedOrTruncated || tools.truncated ||
       finalTools.length < tools.selected.length || relevantTruncated,
     selectedCandidates: [
+      ...assistantContext.map((item) => ({
+        id: item.id,
+        entryIndex: item.source.entryIndex,
+        kind: "assistant-context" as const,
+        reason: "preceding-assistant" as const,
+        secondaryReasons: [],
+        surfaceProfile: profile,
+        originalCharacters: item.content.length,
+        selectedCharacters: item.content.length,
+        estimatedTokens: estimateReviewerTokens(item.content),
+        truncated: !item.source.complete,
+        sensitivity: "proposal-context" as const,
+      })),
       ...users.selected.map((item) =>
         selectedMetadata(
           item,

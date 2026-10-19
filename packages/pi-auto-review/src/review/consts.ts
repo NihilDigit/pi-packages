@@ -1,7 +1,11 @@
 import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 
 export const EXTENSION_NAME = "pi-auto-review";
+export function agentDirectory(): string {
+  return getAgentDir();
+}
 // This module sits at <package root>/src/review/ — three levels up.
 export const PACKAGE_ROOT = dirname(
   dirname(dirname(fileURLToPath(import.meta.url))),

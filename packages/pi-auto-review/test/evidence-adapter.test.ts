@@ -56,7 +56,7 @@ test("full latest and request/toolcall/session-linked raw messages ignore option
   assert.equal(applyReviewerInputBudget(request, transcript, undefined, 8192).failureCode, undefined);
 });
 
-test("many actor-only mentions stay optional and do not crowd out exact authorization", () => {
+test("actor-only mentions do not enter the reviewer evidence for a different task", () => {
   const entries = [
     ...Array.from({ length: 60 }, (_, index) => user(`actor-${index}`, `sol ${"old-context ".repeat(100)}`)),
     user("linked", "request-exact: preserve this direct authorization and its constraint."),
@@ -64,10 +64,7 @@ test("many actor-only mentions stay optional and do not crowd out exact authoriz
   ];
   const transcript = buildClassifierTranscript(entries, DEFAULT_CONFIG, request);
   const optional = transcript.reviewerEvidence.userMessages.filter((item) => item.reason === "actor-reference");
-  assert.ok(optional.length > 0 && optional.length < 60);
-  assert.ok(optional.reduce((sum, item) => sum + estimateReviewerTokens(item.content), 0) <=
-    DEFAULT_CONFIG.maxUserTranscriptTokens);
-  assert.ok(optional.every((item) => item.source?.complete && item.source.provenance === "raw-user-message"));
+  assert.equal(optional.length, 0);
   assert.equal(transcript.rawUserAuthorization?.sources.length, 2);
   const budgeted = applyReviewerInputBudget(request, transcript, undefined, 8192);
   assert.equal(budgeted.failureCode, undefined);
@@ -78,7 +75,7 @@ test("many actor-only mentions stay optional and do not crowd out exact authoriz
   assert.deepEqual(envelope.request, request);
 });
 
-test("optional actor history is removed under the global cap without losing raw source identity", () => {
+test("recent history can be removed whole without losing mandatory raw source identity", () => {
   const latest = user("latest", "Only the bounded synthetic task.");
   const mandatory = buildClassifierTranscript([latest], DEFAULT_CONFIG, request);
   const source = buildClassifierTranscript([
@@ -93,7 +90,8 @@ test("optional actor history is removed under the global cap without losing raw 
     ...mandatory.rawUserAuthorization,
     sources: [{ ...mandatory.rawUserAuthorization.sources[0]!, entryIndex: 1 }],
   });
-  assert.equal(source.reviewerEvidence.userMessages.length, 2, "source remains immutable");
+  assert.equal(source.reviewerEvidence.userMessages.length, 2);
+  assert.equal(source.reviewerEvidence.userMessages[0]?.reason, "recent-user-history");
   assert.equal(budgeted.reviewerEvidence.userMessages[0]?.content, latest.message.content);
   const envelope = JSON.parse(sharedReviewContext(request, budgeted));
   assert.equal(envelope.omissions.evidenceOmittedOrTruncated, false);

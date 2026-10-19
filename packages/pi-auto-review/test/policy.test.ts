@@ -1043,7 +1043,7 @@ test("an unrelated long first message never consumes latest-intent budget", () =
   );
   assert.match(transcript.text, /LATEST-TARGET/);
   assert.doesNotMatch(transcript.text, /FIRST-/);
-  assert.equal(transcript.truncated, false);
+  assert.equal(transcript.optionalHistoryOmittedOrTruncated, true);
 });
 
 test("latest raw authorization is mandatory and never clipped by optional quotas", () => {
@@ -1075,7 +1075,7 @@ test("latest raw authorization is mandatory and never clipped by optional quotas
   }]);
 });
 
-test("older prohibition text is not selected without an exact request reference", () => {
+test("recent user limits remain visible without being rewritten into a host verdict", () => {
   const transcript = buildClassifierTranscript(
     [
       {
@@ -1090,16 +1090,16 @@ test("older prohibition text is not selected without an exact request reference"
     { maxUserTranscriptTokens: 100, maxToolTranscriptTokens: 400 },
     { command: "git push origin HEAD:main" },
   );
-  assert.doesNotMatch(transcript.text, /Do not push to main/);
+  assert.match(transcript.text, /Do not push to main/);
   assert.equal(transcript.userConstraint, "none");
   assert.equal(transcript.userAuthorizationCeiling, "high");
   assert.deepEqual(
     transcript.selectedCandidates.map((candidate) => [candidate.id, candidate.reason]),
-    [["entry:latest:user", "latest-user"]],
+    [["entry:constraint:user", "recent-user-history"], ["entry:latest:user", "latest-user"]],
   );
 });
 
-test("older user evidence requires an exact request identifier", () => {
+test("exact user references remain distinct from bounded recent conversation", () => {
   const transcript = buildClassifierTranscript(
     [
       {
@@ -1119,10 +1119,10 @@ test("older user evidence requires an exact request identifier", () => {
     { id: "request-42", surface: "network", destination: "example.com:443" },
   );
   assert.match(transcript.text, /Approve only request-42/);
-  assert.doesNotMatch(transcript.text, /similar request/);
+  assert.match(transcript.text, /similar request/);
   assert.deepEqual(
     transcript.selectedCandidates.map((candidate) => candidate.reason),
-    ["exact-request-reference", "latest-user"],
+    ["exact-request-reference", "recent-user-history", "latest-user"],
   );
 });
 

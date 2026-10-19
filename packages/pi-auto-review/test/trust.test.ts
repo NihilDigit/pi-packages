@@ -205,7 +205,7 @@ test("current-model mode is trusted configuration and projects cannot select it"
 test("userConfigPath resolves under the agent extensions directory", () => {
   assert.equal(
     userConfigPath("/home/demo"),
-    "/home/demo/.pi/agent/extensions/pi-auto-review/config.json",
+    join("/home/demo", ".pi", "agent", "extensions", "pi-auto-review", "config.json"),
   );
 });
 

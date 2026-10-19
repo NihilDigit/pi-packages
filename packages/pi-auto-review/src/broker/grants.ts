@@ -16,6 +16,7 @@ function stableValue(value: unknown): unknown {
 }
 
 export function boundaryRequestHash(request: BoundaryRequest): string {
+  const action = request.toolAction;
   const material = {
     source: request.source,
     surface: request.surface,
@@ -36,7 +37,19 @@ export function boundaryRequestHash(request: BoundaryRequest): string {
     destinationProtocol: request.destinationProtocol,
     toolName: request.toolName,
     skillName: request.skillName,
-    toolInputPreview: request.toolInputPreview,
+    toolActionStatus: request.toolActionStatus,
+    ...(action ? {
+      toolAction: {
+        version: action.version,
+        toolName: action.toolName,
+        input: action.input,
+        inputState: action.inputState,
+        source: action.source,
+      },
+    } : {}),
+    // A display preview cannot bind complete input, nor should its formatting
+    // prevent an exact retry. Legacy requests still bind their only input facts.
+    toolInputPreview: action?.inputState === "complete" ? undefined : request.toolInputPreview,
     agentName: request.agentName,
     requesterSessionId: request.requesterSessionId,
     accessIntent: request.accessIntent,

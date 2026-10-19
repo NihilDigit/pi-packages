@@ -711,8 +711,10 @@ test("in-process nodes register independently and child shutdown preserves paren
 
 test("automatic authorizer spellings reach policy audit without a UI prompt", async () => {
   const previousHome = process.env.HOME;
+  const previousProfile = process.env.USERPROFILE;
   const home = mkdtempSync(join(tmpdir(), "pi-authorizer-spelling-"));
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   try {
     const cases = [
       { outcome: "allow", command: "cat ./notes.txt", approved: true, modelCalls: 1 },
@@ -771,6 +773,8 @@ test("automatic authorizer spellings reach policy audit without a UI prompt", as
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousProfile;
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -1084,9 +1088,8 @@ test("real permission-system authorizer chain integration", async (t) => {
       });
       const context = reviewerTranscript(instance.modelContexts.at(-1));
       assert.equal(context.messages.length, 2);
-      // Loose guard against unbounded prompt growth; the #910 matchedSpelling
-      // sentence sits at ~2.0k characters, so keep headroom for doc tweaks.
-      assert.ok(context.systemPrompt.length < 2_100);
+      // Bound the fixed policy, including proposal context and retry semantics.
+      assert.ok(context.systemPrompt.length < 5_000);
       // Public contract includes the minimal allow example plus detailed schema.
       assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 2);
       assert.match(context.systemPrompt, /\$HOME/);
@@ -2263,7 +2266,7 @@ test("real permission-system authorizer chain integration", async (t) => {
     }
   });
 
-  await t.test("older prohibition text does not enter evidence or rewrite allow", async () => {
+  await t.test("recent user limits enter evidence without rewriting the model verdict", async () => {
     const instance = harness(allow, {
       contextEntries: [
         {
@@ -2288,7 +2291,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       });
       assert.equal(result.decision.approved, true);
       const rendered = JSON.stringify(instance.modelContexts.at(-1));
-      assert.doesNotMatch(rendered, /不要改这些文件/);
+      assert.match(rendered, /不要改这些文件/);
       assert.match(rendered, /漏掉的图片/);
       const completion = instance.telemetry.find(
         (event) => event.type === "review_complete",
@@ -2977,6 +2980,8 @@ test("real permission-system authorizer chain integration", async (t) => {
 
       const retry = await instance.authorize("bash_escalated");
       assert.equal(retry.decision.approved, false);
+      assert.match(reviewerTranscript(instance.modelContexts.at(-1)).systemPrompt,
+        /Host authorization fact for THIS review/);
       const envelope = JSON.parse(
         reviewerTranscript(instance.modelContexts.at(-1)).userPrompt,
       ) as {

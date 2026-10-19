@@ -191,9 +191,16 @@ test("SQLite store persists aggregates, isolates projects, deduplicates forwarde
   try {
     const first = await PolicyAuditStore.open({ directory, retentionDays: 180, now: () => now });
     assert.equal(POLICY_AUDIT_SCHEMA_VERSION, 3);
-    assert.equal(statSync(directory).mode & 0o777, 0o700);
-    assert.equal(statSync(join(directory, "policy-audit.key")).mode & 0o777, 0o600);
-    assert.equal(statSync(join(directory, "policy-audit.sqlite")).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(directory).mode & 0o777, 0o700);
+      assert.equal(statSync(join(directory, "policy-audit.key")).mode & 0o777, 0o600);
+      assert.equal(statSync(join(directory, "policy-audit.sqlite")).mode & 0o777, 0o600);
+    } else {
+      // NTFS does not represent POSIX group/other permission bits.
+      assert.equal(statSync(directory).isDirectory(), true);
+      assert.equal(statSync(join(directory, "policy-audit.key")).isFile(), true);
+      assert.equal(statSync(join(directory, "policy-audit.sqlite")).isFile(), true);
+    }
     assert.equal(first.record("/work/alpha/private", decision("forwarded-secret-id", { forwarded: true })), true);
     assert.equal(first.record("/work/alpha/private", decision("forwarded-secret-id", { forwarded: true })), false);
     assert.equal(first.record("/work/beta/private", decision("request-beta", { result: "deny", resolution: "user_denied" })), true);

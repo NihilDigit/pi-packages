@@ -26,7 +26,7 @@ import {
   PROJECT_CONFIG_PATH,
   REVIEWER_FRAMING_RESERVE_TOKENS,
 } from "./consts.ts";
-import { REVIEWER_SYSTEM_PROMPT } from "./prompts.ts";
+import { reviewerSystemPrompt } from "./prompts.ts";
 import { applyProjectConfig } from "./config.ts";
 import { assertTrustedInstallation } from "./guards.ts";
 import { estimateReviewerTokens } from "./token-estimate.ts";
@@ -160,6 +160,13 @@ export function sharedReviewContext(
   };
   return canonicalReviewerJson({
     evidence: {
+      ...(transcript.reviewerEvidence.assistantContext?.length ? {
+        assistantContext: {
+          items: transcript.reviewerEvidence.assistantContext,
+          trust: "untrusted",
+          interpretation: "reference-context-not-authorization",
+        },
+      } : {}),
       relevantResults: {
         items: transcript.reviewerEvidence.relevantResults,
         trust: "untrusted",
@@ -181,6 +188,7 @@ export function sharedReviewContext(
         reviewerRequestView(request).fullCommandTruncated === true ||
         (request.toolActionStatus !== undefined && request.toolActionStatus !== "complete") ||
         rawUserAuthorization.status !== "complete" ||
+        (transcript.reviewerEvidence.assistantContext?.some((item) => !item.source.complete) ?? false) ||
         transcript.failureCode === "critical_evidence_overflow" ||
         transcript.failureCode === "required_profile_overflow" ||
         transcript.selectedCandidates.some((item) => item.truncated &&
@@ -202,6 +210,9 @@ export function sharedReviewContext(
       ? {
           override: {
             ...reviewerContext.userOverride,
+            retryRequestId: request.id,
+            binding: "host-validated-session-and-exact-action",
+            consumedForCurrentReview: true,
             kind: "trusted-exact-retry",
             trust: "host-generated",
           },
@@ -263,7 +274,7 @@ export function reviewPreflight(
   sharedContext: string,
   maxReviewerInputTokens: number,
 ): ReviewPreflight {
-  const fixedPrompt = preflightPart(REVIEWER_SYSTEM_PROMPT);
+  const fixedPrompt = preflightPart(reviewerSystemPrompt(Boolean(reviewerContext?.userOverride)));
   const canonicalRequest = preflightPart(
     canonicalReviewerJson(reviewerRequestView(request, transcript)),
   );
@@ -274,6 +285,9 @@ export function reviewPreflight(
   );
   const user = combinedPreflightPart(
     transcript.reviewerEvidence.userMessages.map((item) => item.content),
+  );
+  const assistantContext = combinedPreflightPart(
+    transcript.reviewerEvidence.assistantContext?.map((item) => item.content) ?? [],
   );
   const tool = combinedPreflightPart(
     transcript.reviewerEvidence.toolCalls.map((item) => item.content),
@@ -286,12 +300,14 @@ export function reviewPreflight(
     canonicalRequest.characters +
     override.characters +
     user.characters +
+    assistantContext.characters +
     tool.characters +
     relevantResult.characters;
   const dynamicEvidenceTokens =
     canonicalRequest.estimatedTokens +
     override.estimatedTokens +
     user.estimatedTokens +
+    assistantContext.estimatedTokens +
     tool.estimatedTokens +
     relevantResult.estimatedTokens;
   const framing: PreflightPart = {
@@ -315,6 +331,7 @@ export function reviewPreflight(
     canonicalRequest,
     override,
     user,
+    assistantContext,
     tool,
     relevantResult,
     framing,
@@ -332,6 +349,11 @@ export function cloneTranscript(transcript: TranscriptResult): TranscriptResult 
   return {
     ...transcript,
     reviewerEvidence: {
+      ...(transcript.reviewerEvidence.assistantContext ? {
+        assistantContext: transcript.reviewerEvidence.assistantContext.map((item) => ({
+          ...item, source: { ...item.source },
+        })),
+      } : {}),
       userMessages: cloneItems(transcript.reviewerEvidence.userMessages),
       toolCalls: cloneItems(transcript.reviewerEvidence.toolCalls),
       relevantResults: cloneItems(transcript.reviewerEvidence.relevantResults),
@@ -365,6 +387,7 @@ export function recordBudgetRemoval(
 
 export function refreshBudgetedTranscript(transcript: TranscriptResult): void {
   const retainedIds = new Set([
+    ...transcript.reviewerEvidence.assistantContext ?? [],
     ...transcript.reviewerEvidence.userMessages,
     ...transcript.reviewerEvidence.toolCalls,
     ...transcript.reviewerEvidence.relevantResults,
@@ -434,13 +457,26 @@ export function applyReviewerInputBudget(
   refreshBudgetedTranscript(transcript);
   if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
 
+  const contexts = transcript.reviewerEvidence.assistantContext ?? [];
+  for (let index = contexts.length - 1; index >= 0; index--) {
+    const context = contexts[index]!;
+    const user = transcript.reviewerEvidence.userMessages.find((item) => item.id === context.beforeUserMessageId);
+    if (user?.reason !== "recent-user-history") continue;
+    contexts.splice(index, 1);
+    recordBudgetRemoval(transcript, "optional-assistant-context", 1);
+    refreshBudgetedTranscript(transcript);
+    if (estimatedTokens() <= maxReviewerInputTokens) return transcript;
+  }
+
   for (let index = 0; index < transcript.reviewerEvidence.userMessages.length;) {
     const item = transcript.reviewerEvidence.userMessages[index];
-    if (!item || item.reason !== "actor-reference") {
+    if (!item || item.reason !== "recent-user-history") {
       index++;
       continue;
     }
     transcript.reviewerEvidence.userMessages.splice(index, 1);
+    transcript.reviewerEvidence.assistantContext = transcript.reviewerEvidence.assistantContext
+      ?.filter((context) => context.beforeUserMessageId !== item.id);
     recordBudgetRemoval(transcript, "optional-user-history", 1);
     refreshBudgetedTranscript(transcript);
     if (estimatedTokens() <= maxReviewerInputTokens) return transcript;

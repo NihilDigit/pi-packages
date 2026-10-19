@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { agentDirectory } from "../review/consts.ts";
 import type { ClassifiedPermission } from "./classifier.ts";
 import { loadSqlite, type SqliteDatabase, type SqliteModule } from "./sqlite.ts";
 
@@ -388,6 +389,7 @@ export class PolicyAuditStore {
   }
 }
 
-export function defaultPolicyAuditDirectory(home: string): string {
-  return join(home, ".pi", "agent", "extensions", "pi-auto-review");
+export function defaultPolicyAuditDirectory(home?: string): string {
+  return home === undefined ? join(agentDirectory(), "extensions", "pi-auto-review")
+    : join(home, ".pi", "agent", "extensions", "pi-auto-review");
 }

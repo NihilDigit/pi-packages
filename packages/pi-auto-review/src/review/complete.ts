@@ -188,6 +188,7 @@ export async function complete(
           ...meta,
           auth,
           sessionId: reviewerSessionId(ctx, config, meta.model, auth),
+          trustedExactRetry: Boolean(reviewerContext?.userOverride),
         };
       } catch (error) {
         lastError = error;
@@ -376,4 +377,24 @@ export function denialLabel(
     denial.request.operation;
   const compact = String(target).replace(/\s+/g, " ").slice(0, 90);
   return `${index + 1}. ${denial.request.surface}: ${compact} — ${denial.review.rationale.slice(0, 70)}`;
+}
+
+export function retryActionSummary(denial: {
+  requestId: string;
+  requestHash: string;
+  request: BoundaryRequest;
+}): string {
+  const command = executionText(denial.request);
+  const target = denial.request.resolvedPath ?? denial.request.path ??
+    denial.request.destination ?? denial.request.operation;
+  return JSON.stringify({
+    requestId: denial.requestId,
+    actionHash: denial.requestHash,
+    scope: "entire-original-tool-call",
+    surface: denial.request.surface,
+    operation: denial.request.operation,
+    target: target.length <= 512 ? target : "[omitted; bound by actionHash]",
+    ...(command && command.length <= 2048 ? { command } : {}),
+    ...(command && command.length > 2048 ? { commandOmitted: true } : {}),
+  });
 }

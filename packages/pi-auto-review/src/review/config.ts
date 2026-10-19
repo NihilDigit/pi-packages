@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  agentDirectory,
   BOUNDED_SURFACES,
   EXTENSION_NAME,
   USER_CONFIG_RELATIVE_PATH,
@@ -171,8 +171,9 @@ export function packageConfigPath(): string {
   return join(dirname(dirname(fileURLToPath(import.meta.url))), "config.json");
 }
 
-export function userConfigPath(home = homedir()): string {
-  return join(home, USER_CONFIG_RELATIVE_PATH);
+export function userConfigPath(home?: string): string {
+  return home === undefined ? join(agentDirectory(), "extensions", EXTENSION_NAME, "config.json")
+    : join(home, USER_CONFIG_RELATIVE_PATH);
 }
 
 function readJsonConfig(path: string): unknown {

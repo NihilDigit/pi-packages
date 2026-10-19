@@ -268,6 +268,13 @@ The host-generated override:
 
 It is authorization evidence, not a direct allow.
 
+The host matches and consumes that override before model review. The reviewer
+receives both the earlier `originalRequestId` and the current `retryRequestId`;
+they normally differ. Fresh request and tool-call IDs do not invalidate an exact
+retry. Complete tool actions bind their full canonical input and originating
+session, rather than the display preview; changed arguments cannot reuse the
+approval even when their previews are identical.
+
 `/auto-review-break-glass` is a separate, high-friction path for model denials
 whose risk level is `critical`. It lists only critical model denials from the
 same session made in the last five minutes. After showing the rationale,
@@ -337,20 +344,37 @@ Grants expire after `grantTtlMs` and cannot be reused.
 
 ## Reviewer context and token budgets
 
+User configuration, audit storage and protected installation metadata follow
+Pi's configured Agent directory, including `PI_CODING_AGENT_DIR`. Non-secret
+installation metadata remains readable; rewriting its code pointers is denied.
+
 The reviewer receives one compact canonical request plus bounded, explicitly
 untrusted evidence. Selection is deterministic rather than semantic:
 
 - the latest raw user message is the authorization anchor;
-- older user messages require an exact request/tool/requester association or an
-  exact trusted retry;
+- its preceding visible assistant reply is retained separately as untrusted
+  reference context, so an approval such as “按这个改” has a concrete referent;
+- exact request/tool/requester associations and trusted retries retain their
+  related raw user messages; the remaining transcript budget also retains a
+  continuous recent sequence of raw user turns in chronological order;
+- each retained user's preceding visible assistant reply is separate untrusted
+  reference context, so a short continuation can refer to its concrete proposal;
 - tool calls require an exact tool-call ID, exact structured request fields, a
   surface profile, or a security-combination classification; and
 - selected results stay paired with their producer and are limited to exact
   results, deletion prechecks, Git push context, matching branch protection,
   and Sandbox Runtime process evidence.
 
-Unrelated reads, directory listings, builds, tests, assistant prose, and old
-task history are excluded. Compaction and branch summaries are labeled as
+The preceding reply cannot authorize itself or override a later user limit.
+Lookup stops at the prior user turn or a compaction/branch boundary; thinking,
+tool results and assistant prose after the latest user message are excluded.
+Routine internal coordination is judged by its input, destination and effects;
+tool names alone do not grant authority or imply a security-control change.
+
+Unrelated tool reads, directory listings, builds, tests, and unlinked assistant
+prose are excluded. Recent raw user history stops at compaction or an intervening
+turn that cannot fit whole; selection never skips that turn to reach an older
+grant. Compaction and branch summaries are labeled as
 non-authorization context and are never injected as user intent. The host does
 not rewrite a model allow from regex matches on user text, vague continuations,
 or a computed authorization ceiling; those judgments stay with the reviewer
@@ -365,11 +389,13 @@ audit evidence.
 `maxReviewerInputTokens` covers the fixed policy, canonical request, override,
 evidence, omissions, JSON framing, and a 64-token provider-framing reserve. Its
 legal range is 2,048–32,768. Because no matching tokenizer is bundled, the
-`conservative:utf8` estimator counts every UTF-8 byte as one token.
+`conservative:cjk-aware` estimator counts CJK code points as one token and other
+UTF-8 bytes at three bytes per token, rounding up for the whole text.
 
-When over budget, the host removes secondary reasons, older structured tool
-matches, then optional producer/result units, re-estimating after each step. It
-never silently removes the canonical request, exact override, latest user
+When over budget, the host first removes optional assistant reference contexts,
+then optional recent user history, secondary reasons, older structured tool
+matches, and optional producer/result units, re-estimating after each step. It
+never silently removes the canonical request, exact override, preceding reply, latest user
 evidence, security-combination evidence, exact tool linkage, or a required
 surface profile. If mandatory evidence does not fit, review fails closed before
 calling the model. More than four security-combination candidates also fails

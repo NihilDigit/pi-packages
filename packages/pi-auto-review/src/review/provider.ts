@@ -22,7 +22,7 @@ import {
   REVIEWER_MAX_RETRY_AFTER_MS,
   REVIEWER_RETRY_DELAY_MS,
 } from "./consts.ts";
-import { REVIEWER_SYSTEM_PROMPT } from "./prompts.ts";
+import { reviewerSystemPrompt } from "./prompts.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
 import { preflightPart } from "./input.ts";
 
@@ -417,6 +417,7 @@ export function noModelSummary(): ReviewExecutionSummary {
       canonicalRequest: zero,
       override: zero,
       user: zero,
+      assistantContext: zero,
       tool: zero,
       relevantResult: zero,
       framing: zero,
@@ -561,7 +562,7 @@ export async function modelCall(
   metadata: ProviderAttemptMetadata,
 ): Promise<CompletionMessage> {
   const context = {
-    systemPrompt: REVIEWER_SYSTEM_PROMPT,
+    systemPrompt: reviewerSystemPrompt(runtime.trustedExactRetry),
     messages: [
       {
         role: "user" as const,

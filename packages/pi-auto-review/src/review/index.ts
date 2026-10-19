@@ -46,6 +46,7 @@ export {
   complete,
   currentTurnScope,
   denialLabel,
+  retryActionSummary,
   modelDecisionToBoundaryReview,
 } from "./complete.ts";
 export type {

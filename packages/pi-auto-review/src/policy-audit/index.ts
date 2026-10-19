@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { classifyPermission } from "./classifier.ts";
 import { buildPolicyAuditReport, renderPolicyAuditMarkdown, type PolicyAuditReport } from "./report.ts";
@@ -136,7 +135,7 @@ export class PolicyAuditController {
     if (!this.storePromise) {
       const config = this.options.config();
       this.storePromise = PolicyAuditStore.open({
-        directory: this.options.directory ?? defaultPolicyAuditDirectory(homedir()),
+        directory: this.options.directory ?? defaultPolicyAuditDirectory(),
         retentionDays: config.retentionDays,
         ...this.options.storeOptions,
       }).catch((error) => this.failure(error));

@@ -116,6 +116,7 @@ export type ReviewPreflight = {
   canonicalRequest: PreflightPart;
   override: PreflightPart;
   user: PreflightPart;
+  assistantContext: PreflightPart;
   tool: PreflightPart;
   relevantResult: PreflightPart;
   framing: PreflightPart;
@@ -174,6 +175,7 @@ export type ReviewerRuntime = {
   };
   streamSimple?: ApiStreamSimpleFunction;
   sessionId: string;
+  trustedExactRetry?: boolean;
 };
 
 // Model/stream metadata is re-resolved for every review instead of being
@@ -184,7 +186,7 @@ export type ReviewerRuntime = {
 // because pi resolves models.json auth and headers dynamically on every
 // request (including OAuth refresh); it is reacquired per model call in
 // complete().
-export type ReviewerMeta = Omit<ReviewerRuntime, "auth" | "sessionId">;
+export type ReviewerMeta = Omit<ReviewerRuntime, "auth" | "sessionId" | "trustedExactRetry">;
 
 export type ReviewResult = {
   decision: ModelDecision;
