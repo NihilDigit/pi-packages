@@ -965,6 +965,7 @@ function providerBranchQuery(command: string): ProviderBranchQuery | undefined {
 function relevanceReason(
   call: ToolCallRecord,
   request: RelevantBoundaryRequest,
+  inCurrentTurn = false,
 ):
   | "same-tool"
   | "delete-precheck"
@@ -977,7 +978,7 @@ function relevanceReason(
   const pushedBranch = explicitPushBranch(currentCommand);
   const providerQuery = providerBranchQuery(priorCommand);
   const destructive =
-    /\b(?:rm|rmdir|unlink|trash|delete)\b/i.test(currentCommand);
+    /\b(?:rm|rmdir|unlink|trash|delete|recycle_delete)\b/i.test(currentCommand);
   const readOnlyCheck =
     /^\s*(?:stat|ls|find|test|readlink|realpath)\b/i.test(priorCommand);
   const priorWords = /[\n;&|`<>]|\$\(/.test(priorCommand)
@@ -1010,6 +1011,17 @@ function relevanceReason(
     providerQuery.branch === pushedBranch
   ) {
     return "provider-branch-protection";
+  }
+  if (
+    inCurrentTurn &&
+    (call.name === "read" ||
+      call.name === "grep" ||
+      call.name === "find" ||
+      call.name === "ls" ||
+      (call.name === "bash" &&
+        /^\s*(?:playwright-cli|rg|ls|git\s+status|git\s+diff)\b/i.test(priorCommand)))
+  ) {
+    return "same-tool";
   }
   return undefined;
 }
@@ -1079,10 +1091,13 @@ function relevantResultEvidence(
     }
     const call = calls.get(message.toolCallId);
     if (!call) return;
-    const reason = relevanceReason(call, request);
+    const inCurrentTurn = call.entryIndex >= currentTurnStart;
+    const reason = relevanceReason(call, request, inCurrentTurn);
     const text = resultText(message);
-    const crossTurnAllowed = reason === "same-tool";
-    if (reason && text && (crossTurnAllowed || call.entryIndex >= currentTurnStart)) {
+    const crossTurnAllowed =
+      reason === "same-tool" &&
+      Boolean(request.toolCallId && call.id === request.toolCallId);
+    if (reason && text && (crossTurnAllowed || inCurrentTurn)) {
       results.push({
         index,
         reason,
